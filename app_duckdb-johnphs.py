@@ -16,6 +16,35 @@ st.caption(
     "and prioritise recruitment strategies for roles with many vacancies but low applicant response."
 )
 
+SQL_QUERY = """
+    SELECT
+        j.listing_id,
+        j.metadata_jobPostId,
+        j.title,
+        j.employmentTypes,
+        j.positionLevels,
+        j.postedCompany_name,
+        j.metadata_newPostingDate,
+        j.metadata_originalPostingDate,
+        j.metadata_expiryDate,
+        j.metadata_repostCount,
+        j.minimumYearsExperience,
+        j.numberOfVacancies,
+        j.salary_minimum,
+        j.salary_maximum,
+        j.salary_type,
+        j.average_salary,
+        j.metadata_totalNumberOfView,
+        j.metadata_totalNumberJobApplication,
+        j.status_jobStatus,
+        c.category_id,
+        c.category_name
+    FROM sg_job_data AS j
+    INNER JOIN job_listing_categories AS jc
+        ON j.listing_id = jc.listing_id
+    INNER JOIN categories AS c
+        ON jc.category_id = c.category_id
+"""
 
 @st.cache_data(show_spinner=True)
 def load_data(db_path: str) -> pd.DataFrame:
@@ -29,38 +58,9 @@ def load_data(db_path: str) -> pd.DataFrame:
     The returned dataframe has one row per job-category relationship.
     This means a job assigned to 3 categories appears in 3 rows.
     """
-    query = """
-        SELECT
-            j.listing_id,
-            j.metadata_jobPostId,
-            j.title,
-            j.employmentTypes,
-            j.positionLevels,
-            j.postedCompany_name,
-            j.metadata_newPostingDate,
-            j.metadata_originalPostingDate,
-            j.metadata_expiryDate,
-            j.metadata_repostCount,
-            j.minimumYearsExperience,
-            j.numberOfVacancies,
-            j.salary_minimum,
-            j.salary_maximum,
-            j.salary_type,
-            j.average_salary,
-            j.metadata_totalNumberOfView,
-            j.metadata_totalNumberJobApplication,
-            j.status_jobStatus,
-            c.category_id,
-            c.category_name
-        FROM sg_job_data AS j
-        INNER JOIN job_listing_categories AS jc
-            ON j.listing_id = jc.listing_id
-        INNER JOIN categories AS c
-            ON jc.category_id = c.category_id
-    """
 
     with duckdb.connect(db_path, read_only=True) as con:
-        df = con.execute(query).df()
+        df = con.execute(SQL_QUERY).df()
 
     return prepare_data(df)
 
@@ -110,7 +110,7 @@ def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
 
     data["view_to_application_rate"] = np.where(
         data["metadata_totalNumberOfView"] > 0,
-        data["metadata_totalNumberJobApplication"] / data["metadata_totalNumberOfView"],
+        data["metadata_totalNumberJobApplication"] / data["metadata_totalNumberOfView"] * 100,
         np.nan,
     )
 
@@ -152,7 +152,7 @@ def make_summary(data: pd.DataFrame, group_col: str) -> pd.DataFrame:
 
     summary["view_to_application_rate"] = np.where(
         summary["total_views"] > 0,
-        summary["total_applications"] / summary["total_views"],
+        summary["total_applications"] / summary["total_views"] * 100,
         np.nan,
     )
 
@@ -237,7 +237,7 @@ status_options = sorted(df["status_jobStatus"].dropna().unique().tolist())
 selected_status = st.sidebar.multiselect(
     "Job status",
     options=status_options,
-    default=status_options,
+    default=status_options[1:],
 )
 
 salary_cap = st.sidebar.number_input(
@@ -254,6 +254,7 @@ min_role_postings = st.sidebar.slider(
     min_value=1,
     max_value=100,
     value=10,
+    help="Filters out roles with fewer than the specified number of postings with duplicate postings excluded."
 )
 
 filtered = df[
@@ -264,6 +265,7 @@ filtered = df[
     & df["status_jobStatus"].isin(selected_status)
 ].copy()
 
+# Set extreme salary values to NaN to avoid distortion in benchmarks and charts.
 filtered.loc[
     (filtered["average_salary_clean"] <= 0)
     | (filtered["average_salary_clean"] > salary_cap),
@@ -292,9 +294,9 @@ view_to_application_rate = safe_divide(
 kpi1, kpi2, kpi3, kpi4, kpi5 = st.columns(5)
 kpi1.metric("Unique job postings", f"{unique_jobs:,}")
 kpi2.metric("Categories shown", f"{unique_categories:,}")
-kpi3.metric("Total vacancies", f"{int(total_vacancies):,}")
+kpi3.metric("Total vacancies", f"{int(total_vacancies):,}", help="Total number of vacancies across all unique job postings. Some postings may have multiple vacancies, but duplicated postings are removed.")
 kpi4.metric("Median salary", format_currency(median_salary))
-kpi5.metric("Applications / vacancy", f"{applications_per_vacancy:.2f}")
+kpi5.metric("Applications / vacancy", f"{applications_per_vacancy:.1%}", help="Lower values indicate fewer applications per vacancy, suggesting harder-to-fill roles.")
 
 st.caption(
     "Note: Category-level charts count a multi-category posting once per assigned category. "
@@ -337,7 +339,7 @@ with tab1:
         labels={"vacancies": "Vacancies", "category_name": "Job category"},
     )
     fig_categories.update_layout(yaxis={"categoryorder": "total ascending"})
-    left.plotly_chart(fig_categories, use_container_width=True)
+    left.plotly_chart(fig_categories, width='stretch')
 
     top_roles = role_summary.sort_values("vacancies", ascending=False).head(15)
     fig_roles = px.bar(
@@ -349,7 +351,7 @@ with tab1:
         labels={"vacancies": "Vacancies", "title": "Role title"},
     )
     fig_roles.update_layout(yaxis={"categoryorder": "total ascending"})
-    right.plotly_chart(fig_roles, use_container_width=True)
+    right.plotly_chart(fig_roles, width='stretch')
 
     left2, right2 = st.columns(2)
 
@@ -366,7 +368,7 @@ with tab1:
             "vacancies": "Vacancies",
         },
     )
-    left2.plotly_chart(fig_interest, use_container_width=True)
+    left2.plotly_chart(fig_interest, width='stretch')
 
     fig_exp = px.bar(
         category_summary.sort_values("avg_min_experience", ascending=False).head(15),
@@ -380,7 +382,7 @@ with tab1:
         },
     )
     fig_exp.update_layout(yaxis={"categoryorder": "total ascending"})
-    right2.plotly_chart(fig_exp, use_container_width=True)
+    right2.plotly_chart(fig_exp, width='stretch')
 
 with tab2:
     st.subheader("Salary benchmarking")
@@ -402,7 +404,7 @@ with tab2:
         },
     )
     fig_salary_categories.update_layout(yaxis={"categoryorder": "total ascending"})
-    left.plotly_chart(fig_salary_categories, use_container_width=True)
+    left.plotly_chart(fig_salary_categories, width='stretch')
 
     salary_roles = role_summary.dropna(subset=["average_salary"]).sort_values(
         "average_salary", ascending=False
@@ -416,7 +418,7 @@ with tab2:
         labels={"average_salary": "Average monthly salary (S$)", "title": "Role title"},
     )
     fig_salary_roles.update_layout(yaxis={"categoryorder": "total ascending"})
-    right.plotly_chart(fig_salary_roles, use_container_width=True)
+    right.plotly_chart(fig_salary_roles, width='stretch')
 
     st.markdown("#### Category salary benchmark table")
     benchmark_table = category_summary[
@@ -434,15 +436,15 @@ with tab2:
 
     st.dataframe(
         benchmark_table,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config={
             "category_name": "Category",
             "average_salary": st.column_config.NumberColumn("Average salary", format="S$ %.0f"),
             "median_salary": st.column_config.NumberColumn("Median salary", format="S$ %.0f"),
             "avg_min_experience": st.column_config.NumberColumn("Avg. min experience", format="%.1f"),
-            "applications_per_vacancy": st.column_config.NumberColumn("Applications / vacancy", format="%.2f"),
-            "view_to_application_rate": st.column_config.NumberColumn("View → application rate", format="%.1%"),
+            "applications_per_vacancy": st.column_config.NumberColumn("Applications / vacancy", format="%.3f", help="Lower values indicate fewer applications per vacancy, suggesting harder-to-fill categories."),
+            "view_to_application_rate": st.column_config.NumberColumn("View → application rate", format="%.1f%%", help="Lower values indicate fewer applications per view, suggesting lower applicant interest relative to visibility."),
         },
     )
 
@@ -471,7 +473,7 @@ with tab3:
     )
     fig_hard_cat.add_vline(x=cat_vacancy_threshold, line_dash="dash")
     fig_hard_cat.add_hline(y=cat_app_threshold, line_dash="dash")
-    left.plotly_chart(fig_hard_cat, use_container_width=True)
+    left.plotly_chart(fig_hard_cat, width='stretch')
 
     fig_hard_role = px.scatter(
         role_summary,
@@ -489,7 +491,7 @@ with tab3:
     )
     fig_hard_role.add_vline(x=role_vacancy_threshold, line_dash="dash")
     fig_hard_role.add_hline(y=role_app_threshold, line_dash="dash")
-    right.plotly_chart(fig_hard_role, use_container_width=True)
+    right.plotly_chart(fig_hard_role, width='stretch')
 
     hard_roles_table = role_summary[role_summary["hard_to_fill"]].sort_values(
         ["vacancies", "applications_per_vacancy"], ascending=[False, True]
@@ -510,13 +512,13 @@ with tab3:
     st.markdown("#### Roles to prioritise")
     st.dataframe(
         hard_roles_table,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config={
             "average_salary": st.column_config.NumberColumn("Average salary", format="S$ %.0f"),
             "avg_min_experience": st.column_config.NumberColumn("Avg. min experience", format="%.1f"),
-            "applications_per_vacancy": st.column_config.NumberColumn("Applications / vacancy", format="%.2f"),
-            "view_to_application_rate": st.column_config.NumberColumn("View → application rate", format="%.1%"),
+            "applications_per_vacancy": st.column_config.NumberColumn("Applications / vacancy", format="%.3f", help="Lower values indicate fewer applications per vacancy, suggesting harder-to-fill roles."),
+            "view_to_application_rate": st.column_config.NumberColumn("View → application rate", format="%.1f%%", help="Lower values indicate fewer applications per view, suggesting lower applicant interest relative to visibility."),
         },
     )
 
@@ -550,7 +552,7 @@ with tab4:
 
     st.dataframe(
         display_data,
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config={
             "posting_date": st.column_config.DateColumn("Posting date"),
@@ -578,34 +580,9 @@ with tab5:
         "This avoids parsing the original JSON-like categories column inside Streamlit."
     )
 
-    st.code(
-        """
-SELECT
-    j.listing_id,
-    j.metadata_jobPostId,
-    j.title,
-    j.employmentTypes,
-    j.positionLevels,
-    j.postedCompany_name,
-    j.metadata_newPostingDate,
-    j.minimumYearsExperience,
-    j.numberOfVacancies,
-    j.salary_minimum,
-    j.salary_maximum,
-    j.average_salary,
-    j.metadata_totalNumberOfView,
-    j.metadata_totalNumberJobApplication,
-    j.status_jobStatus,
-    c.category_id,
-    c.category_name
-FROM sg_job_data AS j
-INNER JOIN job_listing_categories AS jc
-    ON j.listing_id = jc.listing_id
-INNER JOIN categories AS c
-    ON jc.category_id = c.category_id;
-        """,
-        language="sql",
-    )
+    st.code(SQL_QUERY, language="sql")
+
+
 
 st.divider()
 st.caption(
